@@ -21,5 +21,6 @@ module Rb1drv
       end
     end
 
+    UploadError = Class.new(Error)
   end
 end

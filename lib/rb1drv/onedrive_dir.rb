@@ -1,5 +1,6 @@
 require 'time'
 require 'rb1drv/sliced_io'
+require 'rb1drv/errors'
 
 module Rb1drv
   class OneDriveDir < OneDriveItem
@@ -117,13 +118,25 @@ module Rb1drv
       new_file = nil
 
       result = nil
+      upload_attempts = 0
+      max_upload_attempts = 5
       loop do
+        upload_attempts += 1
+        if upload_attempts > max_upload_attempts
+          raise Errors::UploadError, "Upload failed after #{max_upload_attempts} complete restart attempts"
+        end
+
         catch :restart do
           if resume_session && resume_session['session_url']
             conn = Excon.new(resume_session['session_url'], idempotent: true)
+            access_denied_attempts = 0
             loop do
               result = JSON.parse(conn.get.body)
               break unless result.dig('error', 'code') == 'accessDenied'
+              access_denied_attempts += 1
+              if access_denied_attempts >= max_upload_attempts
+                raise Errors::UploadError, "Upload session repeatedly denied access after #{max_upload_attempts} attempts"
+              end
               sleep 5
             end
             resume_position = result.dig('nextExpectedRanges', 0)&.split('-')&.first&.to_i or resume_session = nil
@@ -135,7 +148,12 @@ module Rb1drv
             file_size == resume_session['source_size'] or resume_session = nil
           end
 
+          session_attempts = 0
           until resume_session && resume_session['session_url'] do
+            session_attempts += 1
+            if session_attempts > max_upload_attempts
+              raise Errors::UploadError, "Failed to create upload session after #{max_upload_attempts} attempts"
+            end
             result = @od.request("#{api_path}:/#{target_name}:/createUploadSession", item: {'@microsoft.graph.conflictBehavior': overwrite ? 'replace' : 'rename'})
             if result['uploadUrl']
               resume_session = {
